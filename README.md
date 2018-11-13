@@ -19,8 +19,21 @@ connection is active then the Telnet server is disabled.
 
 ## Wiring the ESP8266
 
+I made this for a ESP-01 module (with the 8-pin header) but it should not be hard
+to adapt the wiring for other versions.
+
 ![ESP8266](/images/ESP8266-Pinout.png)
 
+Pin | Name  | Wire to
+---------------------------------------
+1   | GND   | Ground
+2   | TX    | RX (serial input) of connected device
+3   | GPIO2 | --> LED --> 150+ Ohm Resistor --> Ground
+4   | CH_EN | --> 10k Resistor -> +3.3V
+5   | GPIO0 | --> 10k Resistor -> +3.3V
+6   | RESET | --> 10k Resistor -> +3.3V
+7   | RX    | TX (serial output) of connected device
+8   | VCC   | +3.3V
 
 ## Initial setup
 
