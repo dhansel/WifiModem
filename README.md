@@ -108,9 +108,9 @@ The module emulates a Hayes-compatible modem with a [basic command set](https://
 By default the module will send and receive its information as fast as the serial
 connection baud rate allows. However, if you want the true nostalgic feel of a slow
 modem connection, you can limit the speed by setting the "Desired Telco Line Speed"
-register S37: **Before** connecting, issue the command "AT S37=N"
+register (S37). **Before** dialing, issue the command "AT S37=N"
 where N is an index defining the desired baud rate:
-0=auto, 1=75, 2=110, 3=300, 4=600, 5=1200, 6=2400, 7=4800, 8=7200, 9=9600, 10=12000, 11=14400
+0=auto (default), 1=75, 2=110, 3=300, 4=600, 5=1200, 6=2400, 7=4800, 8=7200, 9=9600, 10=12000, 11=14400
 
 If the baud rate set in S37 is set to "auto" or is higher than the serial port then the 
 serial port speed is used. 
