@@ -24,7 +24,7 @@ to adapt the wiring for other versions.
 
 ![ESP8266](/images/ESP8266-Pinout.png)
 
-Pin | Name  | Wire to
+Pin | Name  | Connect to
 ----|-------|--------------------------
 1   | GND   | Ground
 2   | TX    | RX (serial input) of connected device
