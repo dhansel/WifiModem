@@ -29,9 +29,9 @@ Pin | Name  | Wire to
 1   | GND   | Ground
 2   | TX    | RX (serial input) of connected device
 3   | GPIO2 | --> LED --> 150+ Ohm Resistor --> Ground
-4   | CH_EN | --> 10k Resistor -> +3.3V
-5   | GPIO0 | --> 10k Resistor -> +3.3V
-6   | RESET | --> 10k Resistor -> +3.3V
+4   | CH_EN | --> 10k Resistor --> +3.3V
+5   | GPIO0 | --> 10k Resistor --> +3.3V
+6   | RESET | --> 10k Resistor --> +3.3V
 7   | RX    | TX (serial output) of connected device
 8   | VCC   | +3.3V
 
@@ -90,3 +90,36 @@ The following options can be configured:
   the negotiation through to the device connected on the serial port.
   Not handling the Telnet negotiation may show some weird characters when connecting
   some BBSs. Some may also stop communicating at all after connecting.
+
+## Telnet server function
+
+After the module has connected to WiFi you can use any Telnet client to connect
+to the module at port 23 (remember that the module will print it's IP address
+on the serial port after connecting).
+
+Up to 3 telnet clients can connect. Input from each client will appear at the module's
+TX serial pin and all data coming in on the module's RX serial pin will be forwarded
+to all telnet clients.
+
+## Modem emulation function
+
+The module emulates a Hayes-compatible modem with a [basic command set](https://en.wikipedia.org/wiki/Hayes_command_set#The_basic_Hayes_command_set). 
+
+By default the module will send and receive its information as fast as the serial
+connection baud rate allows. However, if you want the true nostalgic feel of a slow
+modem connection, you can limit the speed by setting the "Desired Telco Line Speed"
+register S37: **Before** connecting, issue the command "AT S37=N"
+where N is an index defining the desired baud rate:
+0=auto, 1=75, 2=110, 3=300, 4=600, 5=1200, 6=2400, 7=4800, 8=7200, 9=9600, 10=12000, 11=14400
+
+If the baud rate set in S37 is set to "auto" or is higher than the serial port then the 
+serial port speed is used. 
+
+Use ATD, ATDT or ATDP to "dial" a number. The module understands the following formats for
+the number following the ATD command:
+
+- ATDT hostname.com[:port]. Connect to hostname.com. If port is omitted then it defaults to 23.
+- ATDT n.n.n.n[:port]. Connect to IP addres n.n.n.n. If port is omitted then it defaults to 23.
+  Any non-digit can be used as the separator instead of "." or ":".
+- ATDT aaabbbcccddd[pppp]. Connect to IP address aaa.bbb.ccc.ddd[:pppp]. This is useful for some
+  vintage terminal programs that filter out any non-digit characters.
