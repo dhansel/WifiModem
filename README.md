@@ -108,8 +108,7 @@ The module emulates a Hayes-compatible modem with a [basic command set](https://
 By default the module will send and receive its information as fast as the serial
 connection baud rate allows. However, if you want the true nostalgic feel of a slow
 modem connection, you can limit the speed by setting the "Desired Telco Line Speed"
-register (S37). **Before** dialing, issue the command "AT S37=N"
-where N is an index defining the desired baud rate:
+register (S37). **Before** dialing, issue the command "AT S37=N" where N is an index defining the desired baud rate:
 0=auto (default), 1=75, 2=110, 3=300, 4=600, 5=1200, 6=2400, 7=4800, 8=7200, 9=9600, 10=12000, 11=14400
 
 If the baud rate set in S37 is set to "auto" or is higher than the serial port then the 
@@ -125,3 +124,7 @@ the number following the ATD command:
   vintage terminal programs that expect a phone number to only contain digits.
 
 If the port argument is omitted in either of these then it defaults to 23.
+
+Since there are only RX/TX pins on the ESP8266, there are no DSR/DTR or CTS/RTS 
+hardware control signals. However, the module does understand the "+++" sequence to switch
+into command mode during a call.
