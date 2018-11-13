@@ -19,6 +19,7 @@ connection is active then the Telnet server is disabled.
 
 ## Wiring the ESP8266
 
+![ESP8266](/images/ESP8266-Pinout.png)
 
 
 ## Initial setup
