@@ -118,8 +118,10 @@ serial port speed is used.
 Use ATD, ATDT or ATDP to "dial" a number. The module understands the following formats for
 the number following the ATD command:
 
-- ATDT hostname.com[:port]. Connect to hostname.com. If port is omitted then it defaults to 23.
-- ATDT n.n.n.n[:port]. Connect to IP addres n.n.n.n. If port is omitted then it defaults to 23.
+- ATDT hostname.com[:port]. Connect to hostname.com. 
+- ATDT n.n.n.n[:port]. Connect to IP addres n.n.n.n. 
   Any non-digit can be used as the separator instead of "." or ":".
 - ATDT aaabbbcccddd[pppp]. Connect to IP address aaa.bbb.ccc.ddd[:pppp]. This is useful for some
-  vintage terminal programs that filter out any non-digit characters.
+  vintage terminal programs that expect a phone number to only contain digits.
+
+If the port argument is omitted in either of these then it defaults to 23.
