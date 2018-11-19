@@ -31,8 +31,8 @@ WiFiClient serverClients[MAX_SRV_CLIENTS], modemClient;
 ESP8266WebServer webserver(80);
 unsigned long prevCharTime = 0;
 uint8_t modemEscapeState = 0, modemExtCodes = 0, modemReg[255];
-uint32_t filterTelnetState[MAX_SRV_CLIENTS];
 bool    modemCommandMode = true, modemEcho = true, modemQuiet = false, modemVerbose = true;
+
 
 static int linespeeds[] = {0, 75, 110, 300, 600, 1200, 2400, 4800, 7200, 9600, 12000, 14400};
 #define NSPEEDS (sizeof(linespeeds)/sizeof(int))
@@ -67,6 +67,16 @@ enum
   };
 
 
+struct TelnetStateStruct
+{
+  uint8_t cmdLen;
+  uint8_t cmd[4];
+  bool sendBinary;
+  bool receiveBinary;
+  bool receivedCR;
+} modemTelnetState, clientTelnetState[MAX_SRV_CLIENTS];
+
+
 #define MAGICVAL 0xF0E1D2C3B4A59687
 struct WiFiDataStruct
 {
@@ -84,7 +94,7 @@ struct SerialDataStruct
   byte     parity;
   byte     stopbits;
   byte     silent;
-  byte     filterTelnetNegotiation;
+  byte     handleTelnetProtocol;
 } SerialData;
 
 
@@ -226,8 +236,8 @@ void handleRoot()
       s += "<li><a href=\"set?silent=yes\">Do not show</a></li>\n";
     }
   
-  s += "</ul>\n<h2>Telnet negotiation</h2>\n<ul>\n";
-  if( SerialData.filterTelnetNegotiation )
+  s += "</ul>\n<h2>Telnet protocol</h2>\n<ul>\n";
+  if( SerialData.handleTelnetProtocol )
     {
       s += "<li><b>Filter out</b></li>\n";
       s += "<li><a href=\"set?filterTelnet=no\">Pass through</a></li>\n";
@@ -273,10 +283,12 @@ void handleSet()
         SerialData.silent = true;
       else if( webserver.argName(i) == "silent" && webserver.arg(i)=="no" )
         SerialData.silent = false;
+      else if( webserver.argName(i) == "filterTelnet" && webserver.arg(i)=="log" )
+        SerialData.handleTelnetProtocol = 2;
       else if( webserver.argName(i) == "filterTelnet" && webserver.arg(i)=="yes" )
-        SerialData.filterTelnetNegotiation = true;
+        SerialData.handleTelnetProtocol = 1;
       else if( webserver.argName(i) == "filterTelnet" && webserver.arg(i)=="no" )
-        SerialData.filterTelnetNegotiation = false;
+        SerialData.handleTelnetProtocol = 0;
       else
         ok = false;
     }
@@ -424,7 +436,7 @@ void setup()
       SerialData.parity   = 0;
       SerialData.stopbits = 1;
       SerialData.silent   = false;
-      SerialData.filterTelnetNegotiation = true;
+      SerialData.handleTelnetProtocol = 1;
       SerialData.magic    = MAGICVAL;
       EEPROM.put(768, SerialData);
       EEPROM.commit();
@@ -513,7 +525,7 @@ void setup()
   server.begin();
   server.setNoDelay(true);
 
-  modemReset();
+  resetModemState();
 
   // flush serial input buffer
   while( Serial.available() ) Serial.read();
@@ -530,7 +542,16 @@ bool haveTelnetClient()
 }
 
 
-void modemReset()
+void resetTelnetState(struct TelnetStateStruct &s)
+{
+  s.cmdLen = 0;
+  s.sendBinary = false;
+  s.receiveBinary = false;
+  s.receivedCR = false;
+}
+
+
+void resetModemState()
 {
   const uint8_t regDefaults[] = {2, '+', 
                                  3, '\r', 
@@ -555,6 +576,8 @@ void modemReset()
   modemEcho = true;
   modemQuiet = false;
   modemVerbose = true;
+  
+  if( modemClient.connected() ) modemClient.stop();
 }
 
 
@@ -624,42 +647,138 @@ byte getCmdParam(char *cmd, int &ptr)
 }
 
 
-bool handleTelnetNegotiation(uint8_t b, WiFiClient &client, uint32_t *state)
+// returns TRUE if input byte "b" is part of a telnet protocol sequence and should
+// NOT be passed through to the serial interface
+bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruct &state)
 {
-  // returns "true" if parameter "b" is part of a telnet negotiation
-  // sequence (sequence starts with 0xff followed by two more bytes)
-  uint8_t *stateA = (uint8_t *) state;
+#define T_NOP     241 // 0xf1
+#define T_BREAK   243 // 0xf3
+#define T_GOAHEAD 249 // 0xf9
+#define T_WILL    251 // 0xfb
+#define T_WONT    252 // 0xfc
+#define T_DO      253 // 0xfd
+#define T_DONT    254 // 0xfe
+#define T_IAC     255 // 0xff
 
-  if( !SerialData.filterTelnetNegotiation )
-    return false;
-  else if( b == 0xff )
-    stateA[0] = 1;
+  // if not handling telnet protocol then just return
+  if( !SerialData.handleTelnetProtocol ) return false;
 
-  if( stateA[0]==0 )
-    return false;
-  else
+  // ---- handle CR-NUL sequences
+
+  if( state.receivedCR )
     {
-      stateA[stateA[0]] = b;
-      stateA[0]++;
-      if( stateA[0]>=4 )
+      state.receivedCR = false;
+      if( b==0 )
         {
-          bool reply = true;
-
-          if( stateA[2] == 251 && stateA[3] == 1 )
-            stateA[2] = 253; // reply to WILL ECHO with DO ECHO
-          else if( stateA[2] == 251 || stateA[2] == 252 )
-            stateA[2] = 254; // reply to WILL/WONT * with DONT *
-          else if( stateA[2] == 253 || stateA[2] == 254 )
-            stateA[2] = 252; // reply to DO/DONT * with WONT *
-          else
-            reply = false;
-
-          if( reply ) client.write(stateA+1, 3);
-          stateA[0] = 0;
+          // CR->NUL => CR (i.e. ignore the NUL)
+          return true;
         }
-      
+    }
+  else if( b == 0x0d && state.cmdLen==0 && !state.receiveBinary )
+    {
+      // received CR while not in binary mode => remember but pass through
+      state.receivedCR = true;
+      return false;
+    }
+  
+  // ---- handle IAC sequences
+  
+  if( state.cmdLen==0 )
+    {
+      // waiting for IAC byte
+      if( b == T_IAC )
+        {
+          state.cmdLen = 1;
+          state.cmd[0] = T_IAC;
+          return true;
+        }
+    }
+  else if( state.cmdLen==1 )
+    {
+      // received second byte of IAC sequence
+      if( state.cmd[0] == 0x0d )
+        {
+        }
+      else if( b == T_IAC )
+        {
+          // IAC->IAC sequence means regular 0xff data value
+          state.cmdLen = 0; 
+
+          // we already skipped the first IAC (0xff), so just return 'false' to pass this one through
+          return false; 
+        }
+      else if( b == T_NOP || b == T_BREAK || b == T_GOAHEAD )
+        {
+          // NOP, BREAK, GOAHEAD => do nothing and skip
+          state.cmdLen = 0; 
+          return true; 
+        }
+      else
+        {
+          // record second byte of sequence
+          state.cmdLen = 2;
+          state.cmd[1] = b;
+          return true;
+        }
+    }
+  else if( state.cmdLen==2 )
+    {
+      // received third (i.e. last) byte of IAC sequence
+      state.cmd[2] = b;
+
+      bool reply = true;
+      if( state.cmd[1] == T_WILL )
+        {
+          switch( state.cmd[2] )
+            {
+            case 0:  state.cmd[1] = T_DO;   state.receiveBinary = true; break; // SEND-BINARY
+            case 1:  state.cmd[1] = T_DO;   break; // ECHO
+            case 3:  state.cmd[1] = T_DO;   break; // SUPPRESS-GO-AHEAD
+            default: state.cmd[1] = T_DONT; break;
+            }
+        }
+      else if( state.cmd[1] == T_WONT )
+        {
+          switch( state.cmd[2] )
+            {
+            case 0:  state.cmd[1] = T_DO;   state.receiveBinary = false; break; // SEND-BINARY
+            }
+          state.cmd[1] = T_DONT; 
+        }
+      else if( state.cmd[1] == T_DO )
+        {
+          switch( state.cmd[2] )
+            {
+            case 0:  state.cmd[1] = T_WILL; state.sendBinary = true; break; // SEND-BINARY
+            case 3:  state.cmd[1] = T_WILL; break; // SUPPRESS-GO-AHEAD
+            default: state.cmd[1] = T_WONT; break;
+            }
+        }
+      else if( state.cmd[1] == T_DONT )
+        {
+          switch( state.cmd[2] )
+            {
+            case 0:  state.cmd[1] = T_WILL; state.sendBinary = false; break; // SEND-BINARY
+            }
+          state.cmd[1] = T_WONT;
+        }
+      else
+        reply = false;
+
+      // send reply if necessary
+      if( reply ) client.write(state.cmd, 3);
+
+      // start over
+      state.cmdLen = 0;
       return true;
     }
+  else
+    {
+      // invalid state (should never happen) => just reset
+      state.cmdLen = 0;
+    }
+
+  return false;
 }
 
 
@@ -669,7 +788,7 @@ void loop()
 
   if( modemClient && modemClient.connected() )
     {
-      // if telnet server has new client then reject
+      // modem is connected => if telnet server has new client then reject
       if( server.hasClient() ) server.available().stop();
 
       if( !modemCommandMode )
@@ -684,7 +803,7 @@ void loop()
                   while( modemClient.available() && Serial.availableForWrite() )
                     {
                       uint8_t b = modemClient.read();
-                      if( !handleTelnetNegotiation(b, modemClient, filterTelnetState) ) Serial.write(b);
+                      if( !handleTelnetProtocol(b, modemClient, modemTelnetState) ) Serial.write(b);
                     }
                 }
               else if( modemClient.available() && Serial.availableForWrite() )
@@ -694,7 +813,7 @@ void loop()
                   if( millis()>=nextChar )
                     {
                       uint8_t b = modemClient.read();
-                      if( !handleTelnetNegotiation(b, modemClient, filterTelnetState) )
+                      if( !handleTelnetProtocol(b, modemClient, modemTelnetState) )
                         {
                           Serial.write(b);
                           nextChar = millis() + 10000/baud;
@@ -718,18 +837,30 @@ void loop()
 
           if( Serial.available() )
             {
-              char buf[256];
-              int n = 0, millisPerChar = 1000 / (SerialData.baud / (1+SerialData.bits+SerialData.stopbits))+1;
+              uint8_t buf[256];
+              int n = 0, millisPerChar = 1000 / (SerialData.baud / (1+SerialData.bits+SerialData.stopbits)) + 1;
               unsigned long startTime = millis();
               
               if( millisPerChar<5 ) millisPerChar = 5;
               while( Serial.available() && n<256 && millis()-startTime < 100 )
                 {
-                  char c = Serial.read();
-                  buf[n++] = c;
+                  uint8_t b = Serial.read();
+
+                  if( SerialData.handleTelnetProtocol )
+                    {
+                      // Telnet protocol handling is enabled
+
+                      // must duplicate IAC tokens
+                      if( b==T_IAC ) buf[n++] = b;
+
+                      // if not sending in binary mode then a stand-alone CR (without LF) must be followd by NUL
+                      if( !modemTelnetState.sendBinary && n>0 && buf[n-1] == 0x0d && b != 0x0a ) buf[n++] = 0;
+                    }
+
+                  buf[n++] = b;
                   prevCharTime = millis();
                   
-                  if( modemEscapeState>=1 && modemEscapeState<=3 && c==modemReg[REG_ESC] )
+                  if( modemEscapeState>=1 && modemEscapeState<=3 && b==modemReg[REG_ESC] )
                     modemEscapeState++;
                   else
                     modemEscapeState=0;
@@ -739,6 +870,9 @@ void loop()
                   // some BBSs don't recognize the sequence if there is too much delay
                   while( !Serial.available() && millis()-prevCharTime < millisPerChar );
                 }
+              
+              // if not sending in binary mode then a stand-alone CR (without LF) must be followd by NUL
+              if( SerialData.handleTelnetProtocol && !modemTelnetState.sendBinary && buf[n-1] == 0x0d && !Serial.available() ) buf[n++] = 0;
 
               modemClient.write(buf, n);
             }
@@ -764,7 +898,7 @@ void loop()
               if( !serverClients[i] || !serverClients[i].connected() ) 
                 {
                   serverClients[i] = server.available();
-                  filterTelnetState[i] = 0;
+                  resetTelnetState(clientTelnetState[i]);
                   break;
                 }
             }
@@ -785,27 +919,57 @@ void loop()
         if (serverClients[i] && serverClients[i].connected()) {
           if (serverClients[i].available()) {
             //get data from the telnet client and push it to the UART
-            while(serverClients[i].available() && Serial.availableForWrite() ) {
-              uint8_t b = serverClients[i].read();
-              if( !handleTelnetNegotiation(b, serverClients[i], filterTelnetState+i) ) Serial.write(b);
-            }
+            while(serverClients[i].available() && Serial.availableForWrite() ) 
+              {
+                uint8_t b = serverClients[i].read();
+                if( !handleTelnetProtocol(b, serverClients[i], clientTelnetState[i]) ) Serial.write(b);
+              }
           }
         }
       }
           
       //check UART for data
-      if (Serial.available()) 
+      if( Serial.available() )
         {
-          size_t len = Serial.available();
-          uint8_t sbuf[len];
-          Serial.readBytes(sbuf, len);
-          //push UART data to all connected telnet clients
-          for (i = 0; i < MAX_SRV_CLIENTS; i++) {
-            if (serverClients[i] && serverClients[i].connected()) {
-              serverClients[i].write(sbuf, len);
-              delay(1);
+          uint8_t buf[256];
+          int n = 0, millisPerChar = 1000 / (SerialData.baud / (1+SerialData.bits+SerialData.stopbits))+1;
+          unsigned long t, startTime = millis();
+          
+          if( millisPerChar<5 ) millisPerChar = 5;
+          while( Serial.available() && n<256 && millis()-startTime < 100 )
+            {
+              uint8_t b = Serial.read();
+              buf[n++] = b;
+              
+              // if Telnet protocol handling is enabled then we need to duplicate IAC tokens
+              // if they occur in the general data stream
+              if( b==T_IAC && SerialData.handleTelnetProtocol ) buf[n++] = b;
+              
+              // wait a short time to see if another character is coming in so we
+              // can send multi-character (escape) sequences in the same packet
+              t = millis();
+              while( !Serial.available() && millis()-t < millisPerChar );
             }
-          }
+
+          // push UART data to all connected telnet clients
+          for (i = 0; i < MAX_SRV_CLIENTS; i++) 
+            if( serverClients[i] && serverClients[i].connected() )
+              {
+                if( !SerialData.handleTelnetProtocol || clientTelnetState[i].sendBinary )
+                  serverClients[i].write(buf, n);
+                else
+                  {
+                    // if sending in telnet non-binary mode then a stand-alone CR (without LF) must be followd by NUL
+                    uint8_t buf2[512];
+                    int j, m = 0;
+                    for(j=0; j<n; j++)
+                      {
+                        buf2[m++] = buf[j];
+                        if( buf[j]==0x0d && (j>=n-1 || buf[j+1]!=0x0a) ) buf2[m++] = 0;
+                      }
+                    serverClients[i].write(buf2, m);
+                  }
+              }
         }
     }
   else if( modemCommandMode )
@@ -935,7 +1099,6 @@ void loop()
 
                       if( status==E_OK )
                         {
-                          //Serial.print("connecting to: "); Serial.print(n[0]); Serial.print('.'); Serial.print(n[1]); Serial.print('.'); Serial.print(n[2]); Serial.print('.'); Serial.print(n[3]); Serial.print(':'); Serial.println(port);
                           if( modemClient.connect(addr, port) )
                             {
                               // force at least 1 second delay between receiving
@@ -944,8 +1107,8 @@ void loop()
                               
                               modemCommandMode = false;
                               modemEscapeState = 0;
-                              filterTelnetState[0] = 0;
-
+                              resetTelnetState(modemTelnetState);
+                                
                               if( modemReg[REG_LINESPEED]==0 )
                                 {
                                   int i = 0;
@@ -1025,7 +1188,7 @@ void loop()
                     {
                       // reset parameters (ignore command parameter)
                       getCmdParam(cmd, ptr);
-                      modemReset();
+                      resetModemState();
 
                       // ATZ can not be followed by other commands
                       ptr = cmdLen;
