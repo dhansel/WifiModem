@@ -74,6 +74,7 @@ struct TelnetStateStruct
   bool sendBinary;
   bool receiveBinary;
   bool receivedCR;
+  bool subnegotiation;
 } modemTelnetState, clientTelnetState[MAX_SRV_CLIENTS];
 
 
@@ -95,6 +96,7 @@ struct SerialDataStruct
   byte     stopbits;
   byte     silent;
   byte     handleTelnetProtocol;
+  char     telnetTerminalType[100];
 } SerialData;
 
 
@@ -239,17 +241,34 @@ void handleRoot()
   s += "</ul>\n<h2>Telnet protocol</h2>\n<ul>\n";
   if( SerialData.handleTelnetProtocol )
     {
-      s += "<li><b>Filter out</b></li>\n";
+      int i;
+      const char *terminalTypes[] = {"none", "ansi", "teletype-33", "unknown", "vt100", "xterm", NULL};
+
+      s += "<li><b>Handle</b> - Report terminal type: ";
+      bool found = false;
+      for(i=0; terminalTypes[i]!=NULL; i++)
+        {
+          if( i>0 ) s += ", ";
+          if( strcmp(terminalTypes[i], SerialData.telnetTerminalType)==0 || (i==0 && SerialData.telnetTerminalType[0]==0) )
+            { s += "<b>" + String(terminalTypes[i]) + "</b>"; found = true; }
+          else
+            {
+              snprintf(buffer2, 100, "<a href=\"set?telnetTerminalType=%s\">%s</a>", terminalTypes[i], terminalTypes[i]);
+              s += String(buffer2);
+            }
+        }
+
+      if( !found ) s += ", <b>" + String(SerialData.telnetTerminalType) + "</b>";
+      s += "</li>\n";
       s += "<li><a href=\"set?filterTelnet=no\">Pass through</a></li>\n";
     }
   else
     {
-      s += "<li><a href=\"set?filterTelnet=yes\">Filter out</a></li>\n";
+      s += "<li><a href=\"set?filterTelnet=yes\">Handle</a></li>\n";
       s += "<li><b>Pass through</b></li>\n";
     }
   
   s += "</ul>\n</body>\n</html>";
-
   webserver.send(200, "text/html", s);
 }
 
@@ -289,6 +308,14 @@ void handleSet()
         SerialData.handleTelnetProtocol = 1;
       else if( webserver.argName(i) == "filterTelnet" && webserver.arg(i)=="no" )
         SerialData.handleTelnetProtocol = 0;
+      else if( webserver.argName(i) == "telnetTerminalType" )
+        {
+          int j;
+          String ts = webserver.arg(i);
+          for(j=0; j<99 && j<ts.length() && ts[j]>=32 && ts[j]<127; j++)
+            SerialData.telnetTerminalType[j] = ts[j];
+          SerialData.telnetTerminalType[j] = 0;
+        }
       else
         ok = false;
     }
@@ -438,10 +465,18 @@ void setup()
       SerialData.silent   = false;
       SerialData.handleTelnetProtocol = 1;
       SerialData.magic    = MAGICVAL;
+      strcpy(SerialData.telnetTerminalType, "vt100");
       EEPROM.put(768, SerialData);
       EEPROM.commit();
     }
-
+  else
+    {
+      // make sure terminal type string is ASCII and 0-terminated
+      int i = 0;
+      while(i<99 && SerialData.telnetTerminalType[i]>=32 && SerialData.telnetTerminalType[i]<127) i++;
+      SerialData.telnetTerminalType[i]=0;
+    }
+  
   // read WiFi info
   WiFi.mode(WIFI_STA);
   EEPROM.get(0, WifiData);
@@ -548,6 +583,7 @@ void resetTelnetState(struct TelnetStateStruct &s)
   s.sendBinary = false;
   s.receiveBinary = false;
   s.receivedCR = false;
+  s.subnegotiation = false;
 }
 
 
@@ -651,17 +687,43 @@ byte getCmdParam(char *cmd, int &ptr)
 // NOT be passed through to the serial interface
 bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruct &state)
 {
+#define T_SE      240 // 0xf0
 #define T_NOP     241 // 0xf1
 #define T_BREAK   243 // 0xf3
 #define T_GOAHEAD 249 // 0xf9
+#define T_SB      250 // 0xfa
 #define T_WILL    251 // 0xfb
 #define T_WONT    252 // 0xfc
 #define T_DO      253 // 0xfd
 #define T_DONT    254 // 0xfe
 #define T_IAC     255 // 0xff
 
+#define TO_SEND_BINARY        0
+#define TO_ECHO               1
+#define TO_SUPPRESS_GO_AHEAD  3
+#define TO_TERMINAL_TYPE      24
+
   // if not handling telnet protocol then just return
   if( !SerialData.handleTelnetProtocol ) return false;
+
+  // ---- handle incoming sub-negotiation sequences
+
+  if( state.subnegotiation )
+    {
+      if( SerialData.handleTelnetProtocol>1 ) {Serial.print('<'); Serial.print(b, HEX);}
+
+      if( state.cmdLen==0 && b == T_IAC )
+        state.cmdLen = 1; 
+      else if( state.cmdLen==1 && b == T_SE )
+        {
+          state.subnegotiation = false;
+          state.cmdLen = 0;
+        }
+      else
+        state.cmdLen = 0;
+
+      return true;
+    }
 
   // ---- handle CR-NUL sequences
 
@@ -671,6 +733,7 @@ bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruc
       if( b==0 )
         {
           // CR->NUL => CR (i.e. ignore the NUL)
+          if( SerialData.handleTelnetProtocol>1 ) Serial.print("<0d<00");
           return true;
         }
     }
@@ -690,16 +753,15 @@ bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruc
         {
           state.cmdLen = 1;
           state.cmd[0] = T_IAC;
+          if( SerialData.handleTelnetProtocol>1 ) {Serial.print('<'); Serial.print(b, HEX);}
           return true;
         }
     }
   else if( state.cmdLen==1 )
     {
+      if( SerialData.handleTelnetProtocol>1 ) {Serial.print('<'); Serial.print(b, HEX);}
       // received second byte of IAC sequence
-      if( state.cmd[0] == 0x0d )
-        {
-        }
-      else if( b == T_IAC )
+      if( b == T_IAC )
         {
           // IAC->IAC sequence means regular 0xff data value
           state.cmdLen = 0; 
@@ -713,6 +775,13 @@ bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruc
           state.cmdLen = 0; 
           return true; 
         }
+      else if( b == T_SB )
+        {
+          // start of sub-negotiation
+          state.subnegotiation = true;
+          state.cmdLen = 0;
+          return true;
+        }
       else
         {
           // record second byte of sequence
@@ -724,6 +793,7 @@ bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruc
   else if( state.cmdLen==2 )
     {
       // received third (i.e. last) byte of IAC sequence
+      if( SerialData.handleTelnetProtocol>1 ) {Serial.print('<'); Serial.print(b, HEX);}
       state.cmd[2] = b;
 
       bool reply = true;
@@ -731,9 +801,9 @@ bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruc
         {
           switch( state.cmd[2] )
             {
-            case 0:  state.cmd[1] = T_DO;   state.receiveBinary = true; break; // SEND-BINARY
-            case 1:  state.cmd[1] = T_DO;   break; // ECHO
-            case 3:  state.cmd[1] = T_DO;   break; // SUPPRESS-GO-AHEAD
+            case TO_SEND_BINARY:        state.cmd[1] = T_DO; state.receiveBinary = true; break;
+            case TO_ECHO:               state.cmd[1] = T_DO; break;
+            case TO_SUPPRESS_GO_AHEAD:  state.cmd[1] = T_DO; break;
             default: state.cmd[1] = T_DONT; break;
             }
         }
@@ -741,7 +811,7 @@ bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruc
         {
           switch( state.cmd[2] )
             {
-            case 0:  state.cmd[1] = T_DO;   state.receiveBinary = false; break; // SEND-BINARY
+            case TO_SEND_BINARY: state.cmd[1] = T_DO; state.receiveBinary = false; break;
             }
           state.cmd[1] = T_DONT; 
         }
@@ -749,8 +819,9 @@ bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruc
         {
           switch( state.cmd[2] )
             {
-            case 0:  state.cmd[1] = T_WILL; state.sendBinary = true; break; // SEND-BINARY
-            case 3:  state.cmd[1] = T_WILL; break; // SUPPRESS-GO-AHEAD
+            case TO_SEND_BINARY:       state.cmd[1] = T_WILL; state.sendBinary = true; break;
+            case TO_SUPPRESS_GO_AHEAD: state.cmd[1] = T_WILL; break;
+            case TO_TERMINAL_TYPE:     state.cmd[1] = SerialData.telnetTerminalType[0]==0 ? T_WONT : T_WILL; break;
             default: state.cmd[1] = T_WONT; break;
             }
         }
@@ -758,7 +829,7 @@ bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruc
         {
           switch( state.cmd[2] )
             {
-            case 0:  state.cmd[1] = T_WILL; state.sendBinary = false; break; // SEND-BINARY
+            case TO_SEND_BINARY: state.cmd[1] = T_WILL; state.sendBinary = false; break;
             }
           state.cmd[1] = T_WONT;
         }
@@ -766,7 +837,30 @@ bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruc
         reply = false;
 
       // send reply if necessary
-      if( reply ) client.write(state.cmd, 3);
+      if( reply ) 
+        {
+          if( SerialData.handleTelnetProtocol>1 )
+            for(int k=0; k<3; k++) {Serial.print('>'); Serial.print(state.cmd[k], HEX);}
+
+          client.write(state.cmd, 3);
+
+          if( state.cmd[1] == T_WILL && state.cmd[2] == TO_TERMINAL_TYPE )
+            {
+              // send terminal-type subnegoatiation sequence
+              uint8_t buf[110], i, n=0;
+              buf[n++] = T_IAC;
+              buf[n++] = T_SB;
+              buf[n++] = TO_TERMINAL_TYPE;
+              buf[n++] = 0; // IS
+              for(i=0; i<100 && SerialData.telnetTerminalType[i]>=32 && SerialData.telnetTerminalType[i]<127; i++) 
+                buf[n++] = SerialData.telnetTerminalType[i];
+              buf[n++] = T_IAC;
+              buf[n++] = T_SE;
+              client.write(buf, n);
+              if( SerialData.handleTelnetProtocol>1 )
+                for(int k=0; k<n; k++) {Serial.print('>'); Serial.print(buf[k], HEX);}
+            }
+        }
 
       // start over
       state.cmdLen = 0;
