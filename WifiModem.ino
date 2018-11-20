@@ -357,26 +357,28 @@ void readString(char *buffer, int buflen, bool password)
   while( true )
   {
     if( Serial.available() )
-    {
-      char c = Serial.read();
-      if( c==10 || c==13 )
       {
-        buffer[len] = 0;
-        return;
+        char c = Serial.read();
+        if( c==10 || c==13 )
+          {
+            buffer[len] = 0;
+            return;
+          }
+        else if( (c==8 || c==127) && len>0 )
+          {
+            Serial.print(char(8)); Serial.print(' '); Serial.print(char(8));
+            len--;
+          }
+        else if( c >= 32 && len<buflen-1 )
+          {
+            buffer[len++] = c;
+            Serial.print(password ? '*' : c);
+          }
       }
-      else if( (c==8 || c==127) && len>0 )
-      {
-        Serial.print(char(8)); Serial.print(' '); Serial.print(char(8));
-        len--;
-      }
-      else if( c >= 32 && len<buflen-1 )
-      {
-        buffer[len++] = c;
-        Serial.print(password ? '*' : c);
-      }
-    }
     else
       delay(10);
+      
+    yield();
   }
 }
 
@@ -401,6 +403,7 @@ void GetWiFiData(const char *msg)
      
      unsigned long t = millis()+2000;
      while( millis()<t ) if( Serial.available()>0 && Serial.read()=='C' ) { go = false; break; }
+     yield();
   }
 
   Serial.println("Scanning for networks...");
@@ -894,7 +897,8 @@ void loop()
               if( baud == SerialData.baud )
                 {
                   // use full modem<->computer data rate
-                  while( modemClient.available() && Serial.availableForWrite() )
+                  unsigned long t = millis();
+                  while( modemClient.available() && Serial.availableForWrite() && millis()-t < 100 )
                     {
                       uint8_t b = modemClient.read();
                       if( !handleTelnetProtocol(b, modemClient, modemTelnetState) ) Serial.write(b);
@@ -1013,7 +1017,8 @@ void loop()
         if (serverClients[i] && serverClients[i].connected()) {
           if (serverClients[i].available()) {
             //get data from the telnet client and push it to the UART
-            while(serverClients[i].available() && Serial.availableForWrite() ) 
+            unsigned long t = millis();
+            while(serverClients[i].available() && Serial.availableForWrite() && millis()-t < 100)
               {
                 uint8_t b = serverClients[i].read();
                 if( !handleTelnetProtocol(b, serverClients[i], clientTelnetState[i]) ) Serial.write(b);
