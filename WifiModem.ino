@@ -1200,10 +1200,6 @@ void loop()
                         {
                           if( modemClient.connect(addr, port) )
                             {
-                              // force at least 1 second delay between receiving
-                              // the dial command and responding to it
-                              if( millis()-t<1000 ) delay(1000-(millis()-t));
-                              
                               modemCommandMode = false;
                               modemEscapeState = 0;
                               resetTelnetState(modemTelnetState);
@@ -1223,7 +1219,10 @@ void loop()
                                 modemReg[REG_CURLINESPEED] = min(modemReg[REG_LINESPEED], byte(NSPEEDS-1));
 
                               if( modemExtCodes==0 )
-                                status = E_CONNECT;
+                                {
+                                  status = E_CONNECT;
+                                  connecting = true;
+                                }
                               else
                                 {
                                   switch( modemReg[REG_CURLINESPEED] )
@@ -1246,6 +1245,10 @@ void loop()
                             status = E_NODIALTONE;
                           else
                             status = E_NOANSWER;
+
+                          // force at least 1 second delay between receiving
+                          // the dial command and responding to it
+                          if( millis()-t<1000 ) delay(1000-(millis()-t));
                         }
                       
                       // ATD can not be followed by other commands
@@ -1331,6 +1334,8 @@ void loop()
                 }
               
               printModemResult(status);
+
+              // delay 1 second after a "CONNECT" message
               if( connecting ) delay(1000);
             }
           else if( cmdLen>0 )
