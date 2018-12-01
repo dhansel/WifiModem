@@ -114,6 +114,10 @@ register (S37). **Before** dialing, issue the command "AT S37=N" where N is an i
 If the baud rate set in S37 is set to "auto" or is higher than the serial port then the 
 serial port speed is used. 
 
+The serial baud rate can be temporarily changed by sending "AT#BDR=N" where N is an index
+defining the new baud rate: baud=2400 * N (N=0 selects the baud rate configured via the web server). 
+The module will respond with OK at the previous baud rate and then switch to the new baud rate.
+
 Use ATD, ATDT or ATDP to "dial" a number. The module understands the following formats for
 the number following the ATD command:
 
