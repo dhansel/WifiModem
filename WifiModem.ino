@@ -708,7 +708,7 @@ byte getCmdParam(char *cmd, int &ptr)
 
 // returns TRUE if input byte "b" is part of a telnet protocol sequence and should
 // NOT be passed through to the serial interface
-bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruct &state)
+bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruct &state, bool isServer)
 {
 #define T_SE      240 // 0xf0
 #define T_NOP     241 // 0xf1
@@ -825,7 +825,7 @@ bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruc
           switch( state.cmd[2] )
             {
             case TO_SEND_BINARY:        state.cmd[1] = T_DO; state.receiveBinary = true; break;
-            case TO_ECHO:               state.cmd[1] = SerialData.telnetDisableLocalEcho>0 ? T_DONT : T_DO; break;
+            case TO_ECHO:               state.cmd[1] = isServer && SerialData.telnetDisableLocalEcho>0 ? T_DONT : T_DO; break;
             case TO_SUPPRESS_GO_AHEAD:  state.cmd[1] = T_DO; break;
             default: state.cmd[1] = T_DONT; break;
             }
@@ -845,7 +845,7 @@ bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruc
             case TO_SEND_BINARY:       state.cmd[1] = T_WILL; state.sendBinary = true; break;
             case TO_SUPPRESS_GO_AHEAD: state.cmd[1] = T_WILL; break;
             case TO_TERMINAL_TYPE:     state.cmd[1] = SerialData.telnetTerminalType[0]==0 ? T_WONT : T_WILL; break;
-            case TO_ECHO:              state.cmd[1] = SerialData.telnetDisableLocalEcho>0 ? T_WILL : T_WONT; break;
+            case TO_ECHO:              state.cmd[1] = isServer && SerialData.telnetDisableLocalEcho>0 ? T_WILL : T_WONT; break;
             default: state.cmd[1] = T_WONT; break;
             }
         }
@@ -1239,7 +1239,7 @@ void relayModemData()
           while( modemClient.available() && Serial.availableForWrite() && millis()-t < 100 )
             {
               uint8_t b = modemClient.read();
-              if( !handleTelnetProtocol(b, modemClient, modemTelnetState) ) Serial.write(b);
+              if( !handleTelnetProtocol(b, modemClient, modemTelnetState, false) ) Serial.write(b);
             }
         }
       else if( modemClient.available() && Serial.availableForWrite() )
@@ -1249,7 +1249,7 @@ void relayModemData()
           if( millis()>=nextChar )
             {
               uint8_t b = modemClient.read();
-              if( !handleTelnetProtocol(b, modemClient, modemTelnetState) )
+              if( !handleTelnetProtocol(b, modemClient, modemTelnetState, false) )
                 {
                   Serial.write(b);
                   nextChar = millis() + 10000/baud;
@@ -1329,7 +1329,7 @@ void relayTelnetData()
         while(serverClients[i].available() && Serial.availableForWrite() && millis()-t < 100)
           {
             uint8_t b = serverClients[i].read();
-            if( !handleTelnetProtocol(b, serverClients[i], clientTelnetState[i]) ) Serial.write(b);
+            if( !handleTelnetProtocol(b, serverClients[i], clientTelnetState[i], true) ) Serial.write(b);
           }
       }
     }
