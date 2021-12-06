@@ -90,6 +90,9 @@ The following options can be configured:
   the negotiation through to the device connected on the serial port.
   Not handling the Telnet negotiation may show some weird characters when connecting
   some BBSs. Some may also stop communicating at all after connecting.
+  The "Ask client to disable local echo" will, when enabled, send a "will echo" message to
+  a telnet client after it connects. This is necessary to turn off local echo for some
+  telnet clients (local echo enabled causes each character typed to be printed twice).
 
 ## Telnet server function
 
