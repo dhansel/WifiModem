@@ -30,11 +30,11 @@ WiFiServer server(23);
 WiFiClient serverClients[MAX_SRV_CLIENTS], modemClient;
 ESP8266WebServer webserver(80);
 unsigned long prevCharTime = 0;
-uint8_t modemEscapeState = 0, modemExtCodes = 0, modemReg[255];
+uint8_t modemEscapeState = 0, modemExtCodes = 0, modemReg[256];
 bool    modemCommandMode = true, modemEcho = true, modemQuiet = false, modemVerbose = true;
 
 
-static int linespeeds[] = {0, 75, 110, 300, 600, 1200, 2400, 4800, 7200, 9600, 12000, 14400};
+static unsigned int linespeeds[] = {0, 75, 110, 300, 600, 1200, 2400, 4800, 7200, 9600, 12000, 14400};
 #define NSPEEDS (sizeof(linespeeds)/sizeof(int))
 
 #define LED_PIN 2
@@ -97,6 +97,7 @@ struct SerialDataStruct
   byte     silent;
   byte     handleTelnetProtocol;
   char     telnetTerminalType[100];
+  byte     telnetDisableLocalEcho;
 } SerialData;
 
 
@@ -164,7 +165,7 @@ void applySerialSettings()
 }
 
 
-const int   baud[]   = {110, 150, 300, 600, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 256000, 512000, 921600, 0};
+const uint32_t baud[]   = {110, 150, 300, 600, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 256000, 512000, 921600, 0};
 const int   bits[]   = {5, 6, 7, 8, 0};
 const char *parity[] = {"No parity", "Even parity", "Odd parity", NULL};
 const char *stop[]   = {"One stop bit", "Two stop bits", NULL};
@@ -253,7 +254,8 @@ void handleRoot()
       int i;
       const char *terminalTypes[] = {"none", "ansi", "teletype-33", "unknown", "vt100", "xterm", NULL};
 
-      s += "<li><b>Handle</b> - Report terminal type: ";
+      s += "<li><b>Handle</b>";
+      s += "<ul><li>Report terminal type: ";
       bool found = false;
       for(i=0; terminalTypes[i]!=NULL; i++)
         {
@@ -268,7 +270,13 @@ void handleRoot()
         }
 
       if( !found ) s += ", <b>" + String(SerialData.telnetTerminalType) + "</b>";
-      s += "</li>\n";
+      s += "</li>";
+      s += "<li>Ask client to disable local echo: ";
+      if( SerialData.telnetDisableLocalEcho )
+        s += "<b>yes</b> / <a href=\"set?telnetDisableLocalEcho=no\">no</a>";
+      else
+        s += "<a href=\"set?telnetDisableLocalEcho=yes\">yes</a> / <b>no</b>";
+      s += "</li></ul>\n";
       s += "<li><a href=\"set?filterTelnet=no\">Pass through</a></li>\n";
     }
   else
@@ -311,6 +319,10 @@ void handleSet()
         SerialData.silent = true;
       else if( webserver.argName(i) == "silent" && webserver.arg(i)=="no" )
         SerialData.silent = false;
+      else if( webserver.argName(i) == "telnetDisableLocalEcho" && webserver.arg(i)=="no" )
+        SerialData.telnetDisableLocalEcho = 0;
+      else if( webserver.argName(i) == "telnetDisableLocalEcho" && webserver.arg(i)=="yes" )
+        SerialData.telnetDisableLocalEcho = 1;
       else if( webserver.argName(i) == "filterTelnet" && webserver.arg(i)=="log" )
         SerialData.handleTelnetProtocol = 2;
       else if( webserver.argName(i) == "filterTelnet" && webserver.arg(i)=="yes" )
@@ -319,7 +331,7 @@ void handleSet()
         SerialData.handleTelnetProtocol = 0;
       else if( webserver.argName(i) == "telnetTerminalType" )
         {
-          int j;
+          unsigned int j;
           String ts = webserver.arg(i);
           for(j=0; j<99 && j<ts.length() && ts[j]>=32 && ts[j]<127; j++)
             SerialData.telnetTerminalType[j] = ts[j];
@@ -473,6 +485,7 @@ void setup()
       SerialData.parity   = 0;
       SerialData.stopbits = 1;
       SerialData.silent   = false;
+      SerialData.telnetDisableLocalEcho = true;
       SerialData.handleTelnetProtocol = 1;
       SerialData.magic    = MAGICVAL;
       strcpy(SerialData.telnetTerminalType, "vt100");
@@ -614,7 +627,7 @@ void resetModemState()
                                  38, 20};
 
   for(int i=0; i<256; i++) modemReg[i] = 0;
-  for(int i=0; i<sizeof(regDefaults); i+=2) modemReg[regDefaults[i]] = regDefaults[i+1];
+  for(size_t i=0; i<sizeof(regDefaults); i+=2) modemReg[regDefaults[i]] = regDefaults[i+1];
 
   modemEscapeState = 0;
   modemExtCodes = 0;
@@ -812,7 +825,7 @@ bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruc
           switch( state.cmd[2] )
             {
             case TO_SEND_BINARY:        state.cmd[1] = T_DO; state.receiveBinary = true; break;
-            case TO_ECHO:               state.cmd[1] = T_DO; break;
+            case TO_ECHO:               state.cmd[1] = SerialData.telnetDisableLocalEcho>0 ? T_DONT : T_DO; break;
             case TO_SUPPRESS_GO_AHEAD:  state.cmd[1] = T_DO; break;
             default: state.cmd[1] = T_DONT; break;
             }
@@ -832,6 +845,7 @@ bool handleTelnetProtocol(uint8_t b, WiFiClient &client, struct TelnetStateStruc
             case TO_SEND_BINARY:       state.cmd[1] = T_WILL; state.sendBinary = true; break;
             case TO_SUPPRESS_GO_AHEAD: state.cmd[1] = T_WILL; break;
             case TO_TERMINAL_TYPE:     state.cmd[1] = SerialData.telnetTerminalType[0]==0 ? T_WONT : T_WILL; break;
+            case TO_ECHO:              state.cmd[1] = SerialData.telnetDisableLocalEcho>0 ? T_WILL : T_WONT; break;
             default: state.cmd[1] = T_WONT; break;
             }
         }
@@ -1021,7 +1035,7 @@ void handleModemCommand()
                                 
                           if( modemReg[REG_LINESPEED]==0 )
                             {
-                              int i = 0;
+                              unsigned int i = 0;
                               while( i<NSPEEDS && linespeeds[i]<SerialData.baud ) i++;
                               if( i==NSPEEDS )
                                 modemReg[REG_CURLINESPEED] = 255;
@@ -1141,7 +1155,7 @@ void handleModemCommand()
                 }
               else if( cmd[ptr]=='I' )
                 {
-                  byte n = getCmdParam(cmd, ptr);
+                  getCmdParam(cmd, ptr);
                 }
               else if( cmd[ptr]=='M' || cmd[ptr]=='L' || cmd[ptr]=='A' || cmd[ptr]=='P' || cmd[ptr]=='T' )
                 {
@@ -1216,7 +1230,7 @@ void relayModemData()
 {
   if( modemClient && modemClient.connected() && modemClient.available() ) 
     {
-      int baud = modemReg[REG_CURLINESPEED]==255 ? SerialData.baud : linespeeds[modemReg[REG_CURLINESPEED]];
+      unsigned int baud = modemReg[REG_CURLINESPEED]==255 ? SerialData.baud : linespeeds[modemReg[REG_CURLINESPEED]];
 
       if( baud == SerialData.baud )
         {
@@ -1260,7 +1274,8 @@ void relayModemData()
   if( Serial.available() )
     {
       uint8_t buf[256];
-      int n = 0, millisPerChar = 1000 / (SerialData.baud / (1+SerialData.bits+SerialData.stopbits)) + 1;
+      int n = 0;
+      unsigned int millisPerChar = 1000 / (SerialData.baud / (1+SerialData.bits+SerialData.stopbits)) + 1;
       unsigned long startTime = millis();
               
       if( millisPerChar<5 ) millisPerChar = 5;
@@ -1324,7 +1339,8 @@ void relayTelnetData()
   if( Serial.available() )
     {
       uint8_t buf[256];
-      int n = 0, millisPerChar = 1000 / (SerialData.baud / (1+SerialData.bits+SerialData.stopbits))+1;
+      int n = 0;
+      unsigned int millisPerChar = 1000 / (SerialData.baud / (1+SerialData.bits+SerialData.stopbits))+1;
       unsigned long t, startTime = millis();
           
       if( millisPerChar<5 ) millisPerChar = 5;
@@ -1399,6 +1415,15 @@ void loop()
                 {
                   serverClients[i] = server.available();
                   resetTelnetState(clientTelnetState[i]);
+
+                  // if telnetDisableLocalEcho=yes then tell the client that we will
+                  // echo which will turn off local echo
+                  if( SerialData.handleTelnetProtocol>0 && SerialData.telnetDisableLocalEcho>0 )
+                    {
+                      byte buf[3] = {T_IAC, T_WILL, TO_ECHO};
+                      serverClients[i].write(buf, 3);
+                    }
+
                   break;
                 }
             }
