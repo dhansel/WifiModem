@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------------
-// WiFi Modem and Telnet Server
+// WiFi/Ethernet Modem and Telnet Server
 // Copyright (C) 2018 David Hansel
 //
 // This program is free software; you can redistribute it and/or modify
@@ -17,18 +17,51 @@
 // Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 // -----------------------------------------------------------------------------
 
+#if defined(ARDUINO_WT32_ETH01)
+// install ESP32 support in Arduino, set board type to
+// "WT32-ETH01 Ethernet Module" (with default options)
+// connect serial adapter to pins RX0/TX0, pull IO0 during powerup to
+// enter programming mode.
+
+// un-comment the line below to direct serial input/output to the
+// RXD/TXD pins instead of RX0/TX0
+//#define Serial Serial2
+
+#include <ETH.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#define LED_PIN  IO15
+#define TITLE "WT32-ETH0 Telnet-to-Serial Bridge"
+#define SerialConfig int
+#define IsConnected() ((WiFi.status()==WL_CONNECTED) || eth_connected)
+#define ENC_TYPE_NONE WIFI_AUTH_OPEN
+
+
+#define RXD
+
+#else // ESP8266
+
+// install ESP8266 support in Arduino, set board type to
+// "Generic ESP8266 Module" (with default options)
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
+#define LED_PIN 2
+#define TITLE "ESP8266 Telnet-to-Serial Bridge"
+#define IsConnected() (WiFi.status()==WL_CONNECTED)
+#define WebServer ESP8266WebServer
+
+#endif
+
 #include <EEPROM.h>
 
-
-//how many clients should be able to telnet to this ESP8266
+// how many clients should be able to telnet to this server
 #define MAX_SRV_CLIENTS 3
 
 WiFiServer server(23);
 WiFiClient serverClients[MAX_SRV_CLIENTS], modemClient;
-ESP8266WebServer webserver(80);
+WebServer webserver(80);
 unsigned long prevCharTime = 0;
 uint8_t modemEscapeState = 0, modemExtCodes = 0, modemReg[256];
 bool    modemCommandMode = true, modemEcho = true, modemQuiet = false, modemVerbose = true;
@@ -36,8 +69,6 @@ bool    modemCommandMode = true, modemEcho = true, modemQuiet = false, modemVerb
 
 static unsigned int linespeeds[] = {0, 75, 110, 300, 600, 1200, 2400, 4800, 7200, 9600, 12000, 14400};
 #define NSPEEDS (sizeof(linespeeds)/sizeof(int))
-
-#define LED_PIN 2
 
 #define REG_ESC            2
 #define REG_CR             3
@@ -159,9 +190,11 @@ SerialConfig GetSerialConfig()
 void applySerialSettings()
 {
   Serial.flush();
-  Serial.end();
   delay(100);
   Serial.begin(SerialData.baud, GetSerialConfig());
+#if defined(ARDUINO_WT32_ETH01)
+  Serial2.setPins(RXD2, TXD2);
+#endif
 }
 
 
@@ -179,10 +212,10 @@ void handleRoot()
 
   s = ("<html>\n"
        "<head>\n"
-       "<title>ESP8266 Telnet-to-Serial Bridge</title>\n"
+       "<title>" TITLE "</title>\n"
        "</head>\n"
        "<body>\n"
-       "<h1>ESP8266 Telnet-to-Serial Bridge</h1>\n");
+       "<h1>" TITLE "</h1>\n");
 
   s += "<h2>Baud rate</h1>\n<ul>\n";
   for(i=0; baud[i]; i++)
@@ -409,6 +442,30 @@ void clearSerialBuffer()
   while( Serial.available()>0 ) { Serial.read(); delay(10); }
 }
 
+#if defined(ARDUINO_WT32_ETH01)
+
+static bool eth_connected = false;
+
+void WiFiEvent(WiFiEvent_t event)
+{
+  switch( event )
+    {
+    case ARDUINO_EVENT_ETH_GOT_IP:
+      eth_connected = true;
+      break;
+
+    case ARDUINO_EVENT_ETH_DISCONNECTED:
+    case ARDUINO_EVENT_ETH_STOP:
+      eth_connected = false;
+      break;
+    }
+
+  digitalWrite(LED_PIN, eth_connected);
+}
+
+
+#endif
+
 
 void GetWiFiData(const char *msg)
 {
@@ -425,18 +482,16 @@ void GetWiFiData(const char *msg)
      yield();
   }
 
-  Serial.println("Scanning for networks...");
-
   WiFi.disconnect();
+  Serial.println("Scanning for networks...");
   int n = WiFi.scanNetworks();
   if (n == 0) {
     Serial.println("No networks found.");
   } else {
     Serial.print(n);
-    Serial.println(" networks found:");
+    Serial.println(" networks found. SSIDs:");
     for (int i = 0; i < n; ++i) {
-      Serial.print(i + 1);
-      Serial.print(": ");
+      Serial.print("  ");
       Serial.print(WiFi.SSID(i));
       Serial.print(" (");
       Serial.print(WiFi.RSSI(i));
@@ -448,15 +503,26 @@ void GetWiFiData(const char *msg)
   Serial.println("\n");
   WiFi.disconnect();
 
+#if defined(ARDUINO_WT32_ETH01)
+  Serial.println("Enter empty SSID to disable WiFi interface.\n");
+#endif
+
+ repeat:
   clearSerialBuffer();
   Serial.print("SSID: ");
   readString(WifiData.ssid, 256, false);
   Serial.println();
 
-  clearSerialBuffer();
-  Serial.print("Password: ");
-  readString(WifiData.key, 256, true);
-  Serial.println();
+  if( *WifiData.ssid!=0 )
+    {
+      clearSerialBuffer();
+      Serial.print("Password: ");
+      readString(WifiData.key, 256, true);
+      Serial.println();
+    }
+#if !defined(ARDUINO_WT32_ETH01)
+  else goto repeat;
+#endif
 
   WifiData.magic = MAGICVAL;
   SerialData.silent = false;
@@ -465,14 +531,34 @@ void GetWiFiData(const char *msg)
   EEPROM.commit();
 }
 
+void PrintNetworkInfo()
+{
+#if defined(ARDUINO_WT32_ETH01)
+  if( eth_connected )
+    {
+      Serial.println("\nConnected to wired (ethernet) network.");
+      Serial.print("Listening on port 23 (telnet) at IP "); Serial.println(ETH.localIP());
+    }
+#endif
+
+  if( (WiFi.status()==WL_CONNECTED) )
+    {
+      Serial.print("\nConnected to network "); Serial.println(WifiData.ssid);
+      Serial.print("Listening on port 23 (telnet) at IP "); Serial.println(WiFi.localIP());
+    }
+}
+
 
 void setup() 
 {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  // start serial interface with setup parameters (9600 baud 8N1)
-  Serial.begin(9600);
+  // start serial interface with default parameters (9600 baud 8N1)
+  Serial.begin(9600, SERIAL_8N1);
+#if defined(ARDUINO_WT32_ETH01)
+  Serial2.setPins(RXD2, TXD2);
+#endif
 
   // read serial info
   EEPROM.begin(1024);
@@ -499,62 +585,101 @@ void setup()
       while(i<99 && SerialData.telnetTerminalType[i]>=32 && SerialData.telnetTerminalType[i]<127) i++;
       SerialData.telnetTerminalType[i]=0;
     }
-  
+
   // read WiFi info
   WiFi.mode(WIFI_STA);
   EEPROM.get(0, WifiData);
+
+#if defined(ARDUINO_WT32_ETH01)
   if( WifiData.magic != MAGICVAL ) 
+    {
+      // WT32-ETH01 module defaults to just ethernet connection (no WiFi)
+      strcpy(WifiData.ssid, "");
+      strcpy(WifiData.key, "");
+      WifiData.magic = MAGICVAL;
+      EEPROM.put(0, WifiData);
+    }
+
+  // start Ethernet interface
+  WiFi.onEvent(WiFiEvent);
+  ETH.begin();
+#endif
+
+  if( WifiData.magic != MAGICVAL )
     GetWiFiData("WiFi connection information not configured.");
 
-  // start WiFi interface
-  while( WiFi.status() != WL_CONNECTED )
-  {
-    WiFi.begin(WifiData.ssid, WifiData.key);
-    uint8_t i = 0;
-
-    // try to connect to WiFi
-    while(WiFi.status() != WL_CONNECTED && i++ < 20 ) 
+  if( *WifiData.ssid==0 )
     {
-      delay(250);
-      digitalWrite(LED_PIN, HIGH); 
-      delay(250);
-      digitalWrite(LED_PIN, LOW); 
-      if( Serial.available()>0 && Serial.read() == 27 ) break;
+      int c;
+      for(int i=0; i<6 && (c=Serial.read())!=27; i++)
+        {
+          delay(250);
+          digitalWrite(LED_PIN, HIGH);
+          delay(250);
+          digitalWrite(LED_PIN, LOW);
+        }
+
+      if( c==27 ) GetWiFiData("Received ESC during startup.");
     }
 
-    if( WiFi.status() != WL_CONNECTED )
+  // start WiFi interface (if configured)
+  bool newlyConfigured = false;
+  while( *WifiData.ssid!=0 && (WiFi.status()!=WL_CONNECTED) )
     {
-      char buffer[300];
-      if( i == 21 )
-        sprintf(buffer, "Could not connect to %s.", WifiData.ssid);
-      else
-        sprintf(buffer, "Received ESC during connect.");
-        
-      GetWiFiData(buffer);
-    }
-  }
+      int c=0, i=20;
 
-  // if we get here then we're connected to WiFi
-  digitalWrite(LED_PIN, HIGH); 
+      // try to connect to WiFi
+      WiFi.begin(WifiData.ssid, WifiData.key);
+
+      // wait for connection
+      c = Serial.read();
+      while( c!=27 && (WiFi.status()!=WL_CONNECTED) && i>0 )
+        {
+          delay(250);
+          digitalWrite(LED_PIN, HIGH);
+          delay(250);
+          digitalWrite(LED_PIN, LOW);
+          c = Serial.read();
+          i--;
+        }
+
+      if( c==27 )
+        {
+          GetWiFiData("Received ESC during connect.");
+          newlyConfigured = true;
+        }
+      else if( (WiFi.status()!=WL_CONNECTED) )
+        {
+          char buffer[300];
+          sprintf(buffer, "Could not connect to %s.", WifiData.ssid);
+
+          if( IsConnected() && !newlyConfigured )
+            break; // if we have an ethernet connection then just continue
+          else
+            {
+              GetWiFiData(buffer);
+              newlyConfigured = true;
+            }
+        }
+    }
+
+  digitalWrite(LED_PIN, IsConnected());
 
   // if normal operation is different from 9600 8N1 then print info now
   // (and again after switching)
-  if( !SerialData.silent && (SerialData.baud!=9600 || GetSerialConfig()!=SERIAL_8N1) )
+  if( !SerialData.silent && (SerialData.baud!=9600 || GetSerialConfig()!=SERIAL_8N1) && IsConnected() )
     {
-      Serial.print("\nConnected to network "); Serial.println(WifiData.ssid);
-      Serial.print("Listening on port 23 (telnet) at IP "); Serial.println(WiFi.localIP());
+      PrintNetworkInfo();
       Serial.flush();
     }
 
   // re-start serial interface with normal operation parameters
-  Serial.end();
-  Serial.begin(SerialData.baud, GetSerialConfig());
+  applySerialSettings();
 
-  if( !SerialData.silent )
+  if( !SerialData.silent && IsConnected() )
   {
     Serial.println();
-    Serial.print("\nConnected to network "); Serial.println(WifiData.ssid);
-    Serial.print("Listening on port 23 (telnet) at IP "); Serial.println(WiFi.localIP());
+    PrintNetworkInfo();
     Serial.print("\nPress 's' to skip this information at future connects.");
     
     int n = 3;
@@ -574,7 +699,10 @@ void setup()
     Serial.println('\n');
   }
 
-  MDNS.begin("esp8266");
+  while( Serial.available() ) Serial.read();
+
+  MDNS.begin("SerialBridge");
+
   webserver.on("/", handleRoot);
   webserver.on("/set", handleSet);
   webserver.onNotFound(handleNotFound);
@@ -979,7 +1107,7 @@ void handleModemCommand()
                       while( cmd[p]!=':' && p<cmdLen ) p++;
                       char c = cmd[p];
                       cmd[p] = 0;
-                      if( WiFi.hostByName(cmd+ptr, addr, 5000) )
+                      if( WiFi.hostByName(cmd+ptr, addr) )
                         {
                           if( p+1<cmdLen ) port = atoi(cmd+p+1);
                         }
@@ -1070,7 +1198,7 @@ void handleModemCommand()
                         }
                       else if( modemExtCodes < 2 )
                         status = E_NOCARRIER;
-                      else if( WiFi.status() != WL_CONNECTED )
+                      else if( !IsConnected() )
                         status = E_NODIALTONE;
                       else
                         status = E_NOANSWER;
