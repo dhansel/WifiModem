@@ -37,9 +37,6 @@
 #define IsConnected() ((WiFi.status()==WL_CONNECTED) || eth_connected)
 #define ENC_TYPE_NONE WIFI_AUTH_OPEN
 
-
-#define RXD
-
 #else // ESP8266
 
 // install ESP8266 support in Arduino, set board type to
